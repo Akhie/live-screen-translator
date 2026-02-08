@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, nextTick } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import Tesseract from "tesseract.js";
 
 const appWindow = getCurrentWindow();
 
@@ -18,6 +19,7 @@ const capturedRect = ref(null);
 const overlayText = ref(null);
 
 const lines = ref([]);
+const formattedText = ref(null);
 
 onMounted(() => {
   const rect = document.body.getBoundingClientRect();
@@ -60,8 +62,24 @@ async function onMouseUp() {
   selecting.value = false;
 
   await nextTick();
-  await showPreView();
-  extractLines();
+  const base64 = await showPreView();
+  const imageBlob = await base64ToBlob(base64);
+  const data = await extractTextFromImage(imageBlob);
+  console.log("DATA : ", data.text)
+  // send this data to backend for translation
+  dataToRenderingData(data);
+}
+
+const dataToRenderingData = (data) => {
+  const renderData = {
+    text: data.text,
+    x: preview.value.x,
+    y: preview.value.y,
+    h: preview.value.h,
+    w: preview.value.w
+  }
+  lines.value = [...lines.value, renderData];
+  console.log("Lines.value : ", lines.value)
 }
 
 async function showPreView() {
@@ -95,31 +113,38 @@ async function showPreView() {
       w: logicalW,
       h: logicalH
     };
-    // send this image to backend and get the translation
     capturedRect.value = { x, y, width, height };
-    //overlayText.value = "Hello from backend";
+    return base64;
   } catch (e) {
     console.error("Capture failed:", e);
   }
 }
 
-/* ---------------- logic ---------------- */
-function extractLines() {
-  const height = Math.abs(start.value.y - current.value.y);
+function base64ToBlob(base64) {
+  const [meta, data] = base64.split(",");
+  const mime = meta.match(/:(.*?);/)[1];
 
-  const lineHeight = 20;
-  const count = Math.max(1, Math.floor(height / lineHeight));
+  const binary = atob(data);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
 
-  const top = Math.min(start.value.y, current.value.y);
-  const left = Math.min(start.value.x, current.value.x);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
 
-  const newLines = Array.from({ length: count }).map((_, i) => ({
-    text: `Translated text here ${i + 1}`,
-    x: left + 6,
-    y: top + i * lineHeight - 25,
-  }));
+  return new Blob([bytes], { type: mime });
+}
 
-  lines.value = [...lines.value, ...newLines];
+async function extractTextFromImage(imageBlob) {
+  const result = await Tesseract.recognize(
+    imageBlob,
+    "kor",
+    {
+      logger: m => console.log(m) // progress logs
+    }
+  );
+
+  return result.data;
 }
 
 const textStyle = computed(() => {
@@ -200,9 +225,11 @@ const selectionStyle = computed(() => {
   <!-- rendered text -->
   <div v-for="(line, i) in lines" :key="i" class="overlay-text" :style="{
     left: line.x + 'px',
-    top: line.y + 'px'
+    top: line.y + 'px',
+    width: line.w + 'px',
+    height: line.h + 'px'
   }">
-    {{ line.text }}
+    <div class="data" v-html="line.text"></div>
   </div>
 
   <!-- Render captured image EXACTLY on top -->
@@ -220,14 +247,6 @@ const selectionStyle = computed(() => {
   <div v-if="preview" class="preview">
     <h3>Captured Preview:</h3>
     <img :src="preview.src" />
-  </div>
-  <div v-if="overlayText" class="text-overlay" :style="{
-    left: preview.x + 'px',
-    top: preview.y + 'px',
-    width: preview.w + 'px',
-    height: preview.h + 'px'
-  }">
-    {{ overlayText }}
   </div>
 </template>
 
@@ -292,4 +311,11 @@ const selectionStyle = computed(() => {
   pointer-events: none;
   white-space: pre-wrap;
 }
+
+.data {
+  white-space: pre-wrap;   /* preserves \n and spaces */
+  font-family: monospace;
+  color: red;
+}
+
 </style>
